@@ -6,127 +6,92 @@ from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
 import time
+import json
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), 'dilithium'))
+from dilithium import Dilithium2
+sys.path.append(os.path.join(os.path.dirname(__file__), 'kyberpy'))
+from kyberpy import kyber 
 
-
-# Funzione per generare un timestamp univoco
+# Function to generate a timestamp
 def generate_timestamp():
     return str(int(time.time())).encode('utf-8')
 
-def import_key_from_file(file_path):
-    # Apre il file e legge la chiave
-    with open(file_path, "rb") as f:
-        key_data = f.read()
-    # Importa la chiave utilizzando la libreria PyCryptodome
-    key = RSA.import_key(key_data)
-    return key
 
-# Funzione per cifrare una chiave simmetrica con la chiave pubblica del destinatario e la firma
-def encrypt_and_sign_symmetric_key(symmetric_key, recipient_public_key_file, private_key_file):
-    # Genera un oggetto RSA con la chiave pubblica del destinatario
-    recipient_public_key = import_key_from_file(recipient_public_key_file)
-    # Crea un oggetto RSA in modalità OAEP con la chiave pubblica del destinatario
-    cipher_rsa = PKCS1_OAEP.new(recipient_public_key)
-    # Cifra la chiave simmetrica
-    enc_symmetric_key = cipher_rsa.encrypt(symmetric_key)
-    # Firma la chiave cifrata
-    signature = sign_data(enc_symmetric_key, private_key_file)
-    return enc_symmetric_key + signature
-
-# Funzione per decifrare una chiave simmetrica con la chiave privata e verificare la firma
-def decrypt_and_verify_symmetric_key(enc_symmetric_key, private_key_file, sender_public_key_file):
-    # Estrae la chiave cifrata e la firma dalla stringa di byte
-    signature = enc_symmetric_key[-256:]  # Estrae la firma
-    enc_symmetric_key = enc_symmetric_key[:-256]  # Estrae la chiave cifrata
-    # Verifica la firma della chiave cifrata
-    is_verified = verify_signature(enc_symmetric_key, signature, sender_public_key_file)
-    if not is_verified:
-        print("Firma non verificata")
-        return None, False
-    # Genera un oggetto RSA con la chiave privata
-    private_key = import_key_from_file(private_key_file)
-    # Crea un oggetto RSA in modalità OAEP con la chiave privata
-    cipher_rsa = PKCS1_OAEP.new(private_key)
-    # Decifra la chiave simmetrica
-    symmetric_key = cipher_rsa.decrypt(enc_symmetric_key)
-    return symmetric_key, True
-    
-
-
-# Funzione per cifrare il testo segreto utilizzando AES in modalità CBC
+# Function to encrypt the secret text using AES in CBC mode
 def encrypt_secret_text_with_aes_cbc(secret_text, symmetric_key):
-    # Genera un vettore di inizializzazione (IV) casuale
+    # Generate a random Initialization Vector (IV)
     iv = get_random_bytes(16)
-    # Crea un oggetto AES in modalità CBC con la chiave simmetrica e il IV
+    # Create an AES object in CBC mode with the symmetric key and IV
     cipher = AES.new(symmetric_key, AES.MODE_CBC, iv=iv)
-    # Cifra il testo segreto e aggiunge il padding se necessario
+    # Encrypt the secret text and add padding if necessary
     ciphertext = cipher.encrypt(pad(secret_text, AES.block_size))
-    # Restituisce il ciphertext e il IV
+    # Return the ciphertext and the IV
     return ciphertext, iv
 
-# Funzione per decifrare il testo segreto utilizzando AES in modalità CBC
+# Function to decrypt the secret text using AES in CBC mode
 def decrypt_secret_text_with_aes_cbc(ciphertext, iv, symmetric_key):
-    # Crea un oggetto AES in modalità CBC con la chiave simmetrica e il IV
+    # Create an AES object in CBC mode with the symmetric key and IV
     cipher = AES.new(symmetric_key, AES.MODE_CBC, iv=iv)
-    # Decifra il ciphertext e rimuove il padding
+    # Decrypt the ciphertext and remove padding
     decrypted_text = unpad(cipher.decrypt(ciphertext), AES.block_size)
-    # Restituisce il testo decifrato
+    # Return the decrypted text
     return decrypted_text
 
-# Funzione per firmare i dati
-def sign_data(data, private_key_file):
-    key = import_key_from_file(private_key_file)
-    h = SHA256.new(data)
-    signer = pkcs1_15.new(key)
-    signature = signer.sign(h)
-    return signature
 
-# Funzione per verificare la firma
-def verify_signature(data, signature, sender_public_key_file):
-    key = import_key_from_file(sender_public_key_file)
-    h = SHA256.new(data)
-    verifier = pkcs1_15.new(key)
-    try:
-        verifier.verify(h, signature)
-        return True
-    except (ValueError, TypeError):
-        return False    
-
-# Funzione per cifrare il testo segreto, firmare il messaggio e restituire il messaggio cifrato con firma
-def encrypt_and_sign_message(secret_text, symmetric_key, private_key):
-    # Genera il timestamp
+# Function to encrypt the message
+def encrypt_message(secret_text, symmetric_key):
+    # Generate the timestamp
     timestamp = generate_timestamp()
-    # Cifra il testo segreto con il timestamp utilizzando AES in modalità CBC
-    ciphertext, iv = encrypt_secret_text_with_aes_cbc(secret_text, symmetric_key)
-    # Firma il messaggio cifrato (timestamp + testo cifrato)
-    signature = sign_data(timestamp + iv + ciphertext, private_key)
-    # Combina i dati in un'unica stringa di byte
-    encrypted_message = timestamp + iv + ciphertext + signature
-    # Restituisce il messaggio cifrato con firma
+    # Encrypt the secret text with the timestamp using AES in CBC mode
+    ciphertext, iv = encrypt_secret_text_with_aes_cbc(timestamp + secret_text, symmetric_key)
+    # Combine the data into a single byte string
+    encrypted_message = iv + ciphertext
+    # Return the encrypted message
     return encrypted_message
 
-# Funzione per verificare il timestamp, decifrare il messaggio e verificare la firma
-def decrypt_and_verify_message(encrypted_message, symmetric_key, sender_public_key):
-    # Estrae i dati dalla stringa di byte
-    timestamp = encrypted_message[:10]
-    iv = encrypted_message[10:26]
-    ciphertext = encrypted_message[26:-256]  # Rimuove la firma
-    signature = encrypted_message[-256:]  # Estrae la firma
-    # Verifica la firma del messaggio cifrato (timestamp + IV + testo cifrato)
-    is_verified = verify_signature(timestamp + iv + ciphertext, signature, sender_public_key)
-    if not is_verified:
-        print("Firma non verificata")
-        return None, False  # La firma non è valida, restituisci None per il testo segreto e False per la verifica della firma
-    
-    # Converte il timestamp in un numero intero
+def decrypt_message(encrypted_message, symmetric_key):
+    iv = encrypted_message[:16]
+    ciphertext = encrypted_message[16:]
+    # Decrypt the ciphertext
+    secret_text = decrypt_secret_text_with_aes_cbc(ciphertext, iv, symmetric_key)
+    timestamp = secret_text[:10]
+    secret_text = secret_text[10:]
+    # Convert the timestamp to an integer
     timestamp_int = int(timestamp.decode('utf-8'))
-    # Ottiene il timestamp corrente
+    # Get the current timestamp
     current_timestamp = int(time.time())
     if abs(current_timestamp - timestamp_int) > 30:
-        print("Timestamp non valido")
+        print("Invalid timestamp")
         return None, False
-    # Decifra il testo cifrato
-    secret_text = decrypt_secret_text_with_aes_cbc(ciphertext, iv, symmetric_key)
-    # Restituisce il testo segreto e True per la verifica della firma
-    return secret_text, True 
+    else:
+        return secret_text, True
+    
 
-
+def compute_symmetric_key(payload, kyber_private_key):
+    # Split the payload: the first 768 bytes are 'c', the next 2420 bytes are the signature, and the rest is the certificate
+    c = payload[:768]             # The first 768 bytes
+    signature = payload[768:3188]     # The next 2420 bytes (768 + 2420 = 3188)
+    certificate = payload[3188:]  # The remaining bytes   
+    
+    # Convert the certificate to JSON
+    certificate_json = json.loads(certificate)
+    # Extract the public key from the certificate
+    sender_dilithium_key = certificate_json["dilithium_public_key"]
+    # Verify the certificate
+    cert_signature = bytes.fromhex(certificate_json.pop("signature"))
+    issuer_dilithium_public_key = bytes.fromhex(certificate_json["issuer_dilithium_public_key"])
+    certificate_no_sig = json.dumps(certificate_json, sort_keys=True).encode('utf-8')
+    if not Dilithium2.verify(issuer_dilithium_public_key, certificate_no_sig, cert_signature):
+        print("Certificate verification failed.")
+        return None, None
+    
+    # Verify the signature of 'c'
+    if not Dilithium2.verify(bytes.fromhex(sender_dilithium_key), c, signature):
+        print("Signature verification failed.")
+        return None, None
+    
+    # Decrypt 'c' with my private key
+    symmetric_key = kyber.Kyber512.dec(c, kyber_private_key)
+    return symmetric_key, sender_dilithium_key

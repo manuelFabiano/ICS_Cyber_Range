@@ -1,20 +1,30 @@
 version: "3.9"
 services:
+  central-server:
+    build: ./server
+    ports:
+      - "5000:5000"
+    networks:
+      proxy_proxy:
+        ipv4_address: 172.28.0.10
+
   plc1:
     container_name: plc1
-    image: openplc:v3
+    build: ./plc/plc1
     ports:
       - "8080:8080"
     cap_add:
       - NET_ADMIN
     networks:
       proxy_plc:
-        ipv4_address: 172.29.0.2
+        ipv4_address: 172.29.0.5
     command: >- 
-      sh -c "apt-get install -y iproute2 &&
+      sh -c "apt-get update &&
+      apt-get install -y iproute2 &&
       ip route del default &&
-      ip route add default via 172.29.0.3 &&
+      ip route add default via 172.29.0.4 &&
       tail -f /dev/null"
+
   hmi:
     container_name: hmi
     build: ./hmi
@@ -26,13 +36,13 @@ services:
       - NET_ADMIN
     networks:
       hmi_proxy:
-        ipv4_address: 172.27.0.5
+        ipv4_address: 172.27.0.2
     command: >-
       sh -c "ip route del default &&
-      ip route add default via 172.27.0.4 &&
+      ip route add default via 172.27.0.3 &&
       tail -f /dev/null"
       
-  #plc proxy: 
+  #plc's proxy: 
   proxy1:
     container_name: proxy1
     build: ./proxy
@@ -43,16 +53,17 @@ services:
       - NET_ADMIN
     networks:
       proxy_plc:
-        ipv4_address: 172.29.0.3
+        ipv4_address: 172.29.0.4
       proxy_proxy:
-        ipv4_address: 172.28.0.3
+        ipv4_address: 172.28.0.4
     command: >-
-      sh -c "ip route add 172.27.0.0/24 via 172.28.0.4 &&
+      sh -c "ip route add 172.27.0.0/24 via 172.28.0.3 &&
       cd scripts &&
-      python3 proxy.py"
-     #tail -f /dev/null
+      tail -f /dev/null"
+     #python3 proxy.py"
+     
     
-    
+  #hmi's proxy:
   proxy2:
     container_name: proxy2
     build: ./proxy
@@ -63,26 +74,17 @@ services:
       - NET_ADMIN
     networks:
       hmi_proxy:
-        ipv4_address: 172.27.0.4
+        ipv4_address: 172.27.0.3
       proxy_proxy:
-        ipv4_address: 172.28.0.4
+        ipv4_address: 172.28.0.3
     command: >-
-      sh -c "ip route add 172.29.0.0/24 via 172.28.0.3 &&
+      sh -c "ip route add 172.29.0.0/24 via 172.28.0.4 &&
       cd scripts &&
-      python3 proxy.py"
+      tail -f /dev/null"
+     #python3 proxy.py"
      #tail -f /dev/null
   
-  attacker:
-    container_name: attacker
-    image: ubuntu
-    volumes:
-    - ./attacker:/scripts
-    tty: true
-    cap_add:
-      - NET_ADMIN
-    networks:
-      proxy_proxy:
-        ipv4_address: 172.28.0.6
+
 
 networks:
   proxy_proxy:
@@ -104,8 +106,8 @@ networks:
     name: hmi_proxy
     ipam:
       config:
-        - subnet: 172.27.0.0/24
-          gateway: 172.27.0.1
+        - subnet: 127.27.0.0/24
+          gateway: 127.27.0.1
     
     
           

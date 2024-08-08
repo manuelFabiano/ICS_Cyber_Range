@@ -5,88 +5,155 @@ from Crypto.Util.Padding import pad, unpad
 import os
 from netfilterqueue import NetfilterQueue
 import crypto
+import json
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), 'dilithium'))
+from dilithium import Dilithium2
+sys.path.append(os.path.join(os.path.dirname(__file__), 'kyberpy'))
+from kyberpy import kyber 
 
 iptablesr1 = "iptables -A FORWARD -i eth0 -j NFQUEUE --queue-num 0"
 iptablesr2 = "iptables -A FORWARD -i eth1 -j NFQUEUE --queue-num 0"
 os.system(iptablesr1)
 os.system(iptablesr2)
 
+with open("kyber_private_key", "rb") as f:
+    kyber_private_key = f.read()
 
-#Dizionario per salvare le chiavi simmetriche (ip: chiave)
-keys = dict()
+with open("dilithium_private_key", "rb") as f:
+    dilithium_private_key = f.read()
+    
+with open("certificate", "r") as f:
+    certificate = json.loads(f.read())
   
-'''
-class ModbusTCP(Packet):
-    name = "ModbusTCP"
-    fields_desc = [ ShortField("transaction_id", 0),
-                    ShortField("protocol_id", 0),
-                    ShortField("length", None),
-                    ByteField("unit_id", 0) 
-                ]
-class Modbus(Packet):
-    name = "Modbus"
-    fields_desc = [ ByteField("function_code", 0),
-                    ShortField("reference_number", 0),
-                    ShortField("bit_count", 0),
-                    ByteField("byte_count", 0),
-                    ByteField("data", 0)
-                ]
-'''
+keys = {}
+fragments_payload = {}  
+first_packet = {}
+certificates = {}
+sequences = []
+synlist = []
+retr_counter = 0
+tot_counter = 0
+
 def main():
     def packet_handler(packet):
+        full_payload = b''
         is_verified = True
-        print("test")
+        
         pkt = IP(packet.get_payload())
-        pkt.show()
+        
+        if pkt.haslayer(TCP):
+            if pkt[TCP].dport == 22 or pkt[TCP].sport == 22:
+                print("SSH packet")
+                packet.accept()
+                return
         src_ip = pkt[IP].src
         dst_ip = pkt[IP].dst
+        # Initialize the fragment payload list for the source IP if it doesn't exist
+        if src_ip not in fragments_payload or fragments_payload[src_ip] == []:
+            fragments_payload[src_ip] = []
+            first_packet[src_ip] = pkt
+        
+        # Handle fragmented packets
+        if pkt.flags & 1 or pkt.frag > 0:
+            fragments_payload[src_ip].append(bytes(pkt[Raw].load))
+            if pkt.flags == 2 or pkt.flags == 0:  # Last fragment
+                full_payload = b''.join(fragments_payload[src_ip])
+                pkt = first_packet[src_ip]
+                pkt[TCP].remove_payload()
+                pkt[TCP].add_payload(full_payload)
+                # Set the DF (Don't Fragment) flag (bit 1)
+                pkt.flags |= 0x2  # DF = 0x2 (0010 in binary)
+                # Clear the MF (More Fragments) flag (bit 0)
+                pkt.flags &= ~0x1  # MF = 0x1 (0001 in binary)
+                first_packet[src_ip] = None
+                fragments_payload[src_ip] = []  # Clear the payload list after reassembly
+            else:
+                packet.drop()
+                return
+        else: 
+            if pkt.haslayer(Raw):
+                full_payload = bytes(pkt[Raw].load)
+
         print(f"IP packet: {src_ip} -> {dst_ip}")
         if pkt.haslayer(TCP):
+            global retr_counter
             src_port = pkt[TCP].sport
             dst_port = pkt[TCP].dport
             print(f"TCP packet: {src_port} -> {dst_port}")
-            #Se il pacchetto è indirizzato al hmi
-            if pkt.haslayer(Raw) and pkt[IP].dst == "172.27.0.5":
-                raw_data = bytes(pkt[Raw].load)
-                #OLD WAY: decrypted_data = decrypt_aes(raw_data)
-                decrypted_data, is_verified = crypto.decrypt_and_verify_message(raw_data, keys[src_ip], src_ip + "_public_key.pem")
+            seq = pkt[TCP].seq
+            if seq in sequences and not pkt[TCP].flags & 2:
+                print("Retransmitted packet")
+            else: 
+                sequences.append(seq)
+            # If the packet is addressed to the HMI and has a SYN
+            if pkt[TCP].flags & 2 and pkt[IP].dst == "172.27.0.2":
+                keys[src_ip], sign_key = crypto.compute_symmetric_key(full_payload, kyber_private_key)
+                if keys[src_ip] is None:
+                    print("Error computing symmetric key")
+                    is_verified = False
+                else:
+                    certificates[src_ip] = sign_key
                 if is_verified:
-                    pkt[Raw].load = decrypted_data
-                    print("Raw data decriptati")
+                    print("Symmetric key saved: ", keys[src_ip])
+                    pkt[TCP].remove_payload()
                     del pkt[IP].chksum
                     del pkt[TCP].chksum
                     del pkt[IP].len
-                    pkt.show2()
                 else:
-                    print("Firma non verificata")
-            #Se il pacchetto è indirizzato al plc
-            elif pkt.haslayer(Raw):
+                    print("Signature not verified")
+                   
+            # If the packet has the SYN flag and is addressed to the PLC
+            elif pkt[TCP].flags & 2 and pkt[IP].dst != "172.27.0.2":
+                # Send the certificate to the PLC
+                print("SYN packet received, starting handshake\n")
+                if pkt[IP].dst in synlist:
+                    print("SYN packet already sent, not resending")
+                    is_verified = False
+                else:
+                    synlist.append(pkt[IP].dst)
+                if is_verified:
+                    certificate_json = json.dumps(certificate, sort_keys=True).encode('utf-8')
+                    pkt[TCP].add_payload(certificate_json)
+                    del pkt[IP].chksum
+                    del pkt[TCP].chksum
+                    del pkt[IP].len
+                
+            # If the packet is addressed to the PLC
+            elif pkt[IP].dst != "172.27.0.2" and pkt.haslayer(Raw):
+                if pkt[IP].dst in synlist:
+                    synlist.remove(pkt[IP].dst)
                 raw_data = bytes(pkt[Raw].load)
-                #OLD WAY: encrypted_data = encrypt_aes(raw_data)
-                encrypted_data = crypto.encrypt_and_sign_message(raw_data,keys[dst_ip],src_ip + "_private_key.pem")
+                print("Encrypting packet with ", keys[dst_ip])
+                encrypted_data = crypto.encrypt_message(raw_data, keys[dst_ip])
                 pkt[Raw].load = encrypted_data
                 del pkt[IP].chksum
                 del pkt[TCP].chksum
                 del pkt[IP].len
-                pkt.show2()
-                #packet.set_payload(bytes(pkt))
-                print("Raw data criptati")
-            elif pkt[TCP].flags & 2 and pkt[IP].dst != "172.27.0.5":
-                new_key = get_random_bytes(16)
-                encrypted_key = crypto.encrypt_and_sign_symmetric_key(new_key, dst_ip + "_public_key.pem", src_ip + "_private_key.pem")
-                keys[dst_ip] = new_key
-                pkt[TCP].add_payload(encrypted_key)
-                del pkt[IP].chksum
-                del pkt[TCP].chksum
-                del pkt[IP].len
-                pkt.show2()
+                print("Modbus packet encrypted")
+                
+            # If the packet is addressed to the HMI
+            elif pkt[IP].dst == "172.27.0.2" and pkt.haslayer(Raw):
+                raw_data = bytes(pkt[Raw].load)
+                print("Decrypting packet with ", keys[src_ip])
+                decrypted_data, is_verified = crypto.decrypt_message(raw_data, keys[src_ip])
+                if is_verified:
+                    print("Valid packet")
+                    pkt[Raw].load = decrypted_data
+                    del pkt[IP].chksum
+                    del pkt[TCP].chksum
+                    del pkt[IP].len
+                else:
+                    print("Invalid packet")
+                    is_verified = False
+              
         packet.drop()
         if is_verified:
+            print("\nSending the following packet: ")
+            pkt.show2()
             send(pkt)
     
-    
-    #bind_layers(TCP, ModbusTCP, dport=502)
-    #bind_layers(ModbusTCP, Modbus)    
+      
     print("Starting...")
     nfqueue = NetfilterQueue()
     nfqueue.bind(0, packet_handler)
@@ -98,10 +165,6 @@ def main():
         os.system("iptables -D FORWARD -i eth1 -j NFQUEUE --queue-num 0")
         os.system("iptables -D FORWARD -i eth0 -j NFQUEUE --queue-num 0")
         os.system('iptables -X')
-        
-    
-    #sniff(iface="eth0", prn=packet_from_inside_handler, store=0)
-    #sniff(iface="eth1", prn=packet_from_outside_handler, store=0)
 
 if __name__ == "__main__":
     main()
